@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="he">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>כיפת ברזל</title>
+
+<!-- PWA -->
+<link rel="manifest" href="manifest.json">
+<script>
+  if ('serviceWorker' in navigator)
+    navigator.serviceWorker.register('./sw.js');
+</script>
+
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; font-family: Arial, sans-serif; touch-action: none; }
+  #wrapper { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; }
+  #ui {
+    color: #fff; display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 10px 18px; padding: 6px 14px;
+    background: rgba(0,0,0,0.6); border-radius: 6px; margin-bottom: 6px;
+    font-size: clamp(11px, 3vw, 15px); width: 100%; max-width: 700px;
+  }
+  #ui span { color: #7ef; font-weight: bold; }
+  #toggleMode {
+    padding: 3px 12px; border: none; border-radius: 20px; cursor: pointer;
+    font-size: clamp(11px, 3vw, 14px); font-weight: bold; transition: all 0.3s;
+    background: #f5c542; color: #333;
+  }
+  #toggleMode:hover { opacity: 0.85; }
+  canvas { display: block; border: 2px solid #334; border-radius: 8px; cursor: crosshair; touch-action: none; max-width: 100%; }
+  #gameover {
+    display: none; position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%,-50%);
+    background: rgba(0,0,0,0.85); color: #fff;
+    padding: clamp(16px,4vw,30px) clamp(20px,6vw,50px);
+    border-radius: 16px; text-align: center; border: 2px solid #f44;
+    min-width: 220px;
+  }
+  #gameover h2 { color: #f44; font-size: clamp(1.2em,5vw,2em); margin-bottom: 10px; }
+  #gameover p  { font-size: clamp(13px,3.5vw,16px); }
+  #gameover button {
+    margin-top: 16px; padding: 10px 30px;
+    background: #1a6; color: #fff; border: none;
+    border-radius: 8px; font-size: clamp(13px,3.5vw,16px); cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="wrapper">
+  <div id="ui">
+    ⚡ מיירטים: <span id="ammo">20</span>
+    💥 יורטו: <span id="score">0</span>
+    ❤️ חיים: <span id="lives">3</span>
+    🌊 גל: <span id="wave">1</span>
+    <button id="toggleMode" onclick="toggleDayNight()">☀️ יום</button>
+  </div>
+  <canvas id="c"></canvas>
+  <div id="gameover">
+    <h2>🚨 המשחק נגמר!</h2>
+    <p>ניקוד סופי: <span id="final">0</span></p>
+    <button onclick="initGame()">שחק שוב</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H, GROUND_Y;
+
+function resizeCanvas() {
+  const maxW = 700, maxH = 500;
+  const padding = 12;
+  const uiH = document.getElementById('ui').offsetHeight + 10;
+  const availW = window.innerWidth  - padding * 2;
+  const availH = window.innerHeight - uiH - padding * 2;
+  const scale = Math.min(availW / maxW, availH / maxH, 1);
+  W = Math.floor(maxW * scale);
+  H = Math.floor(maxH * scale);
+  GROUND_Y = H - Math.round(60 * scale);
+  canvas.width  = W;
+  canvas.height = H;
+}
+
+let missiles, interceptors, explosions, stars;
+let score, ammo, lives, wave, frameCount, spawnRate, gameRunning;
+let isDay = false;
+
+function toggleDayNight() {
+  isDay = !isDay;
+  const btn = document.getElementById('toggleMode');
+  btn.textContent = isDay ? '🌙 לילה' : '☀️ יום';
+  btn.style.background = isDay ? '#4a90d9' : '#f5c542';
+  btn.style.color = isDay ? '#fff' : '#333';
+}
+
+function makeStars() {
+  stars = Array.from({length: 80}, () => ({
+    x: Math.random()*W, y: Math.random()*(GROUND_Y*0.7),
+    r: Math.random()*1.5+0.3, a: Math.random()
+  }));
+}
+
+function initGame() {
+  resizeCanvas();
+  missiles = []; interceptors = []; explosions = [];
+  score = 0; ammo = 20; lives = 3; wave = 1; frameCount = 0; spawnRate = 180;
+  gameRunning = true;
+  document.getElementById('gameover').style.display = 'none';
+  makeStars(); updateUI();
+  requestAnimationFrame(loop);
+}
+
+function updateUI() {
+  document.getElementById('ammo').textContent  = ammo;
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = lives;
+  document.getElementById('wave').textContent  = wave;
+}
+
+function s(v) { return v * (W / 700); }
+
+function getEventPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const src = e.touches ? e.touches[0] : e;
+  return {
+    x: (src.clientX - rect.left) * (W / rect.width),
+    y: (src.clientY - rect.top)  * (H / rect.height)
+  };
+}
+
+canvas.addEventListener('click',      e => { if (gameRunning) { const p = getEventPos(e); launchInterceptor(p.x, p.y); }});
+canvas.addEventListener('touchstart', e => { e.preventDefault(); if (gameRunning) { const p = getEventPos(e); launchInterceptor(p.x, p.y); }}, {passive: false});
+
+window.addEventListener('resize', () => { if (gameRunning) { resizeCanvas(); makeStars(); }});
+
+function spawnMissile() {
+  const side = Math.random() < 0.5 ? 'left' : 'right';
+  const startX = side === 'left' ? -20 : W + 20;
+  const startY = Math.random() * (GROUND_Y * 0.5);
+  const targetX = W/2 - s(120) + Math.random()*s(240);
+  const speed = 1.2 + wave * 0.3 + Math.random();
+  const dx = targetX - startX, dy = GROUND_Y - startY;
+  const len = Math.sqrt(dx*dx+dy*dy);
+  missiles.push({ x: startX, y: startY, vx: dx/len*speed*(W/700), vy: dy/len*speed*(W/700), trail: [], alive: true });
+}
+
+function launchInterceptor(tx, ty) {
+  if (ammo <= 0) return;
+  ammo--;
+  const sx = W/2, sy = GROUND_Y - s(25);
+  const dx = tx-sx, dy = ty-sy;
+  const len = Math.sqrt(dx*dx+dy*dy);
+  const spd = 7*(W/700);
+  interceptors.push({ x: sx, y: sy, vx: dx/len*spd, vy: dy/len*spd, trail: [], alive: true });
+  updateUI();
+}
+
+function makeExplosion(x, y, color) {
+  const particles = Array.from({length: 20}, () => {
+    const a = Math.random()*Math.PI*2, spd = (Math.random()*4+1)*(W/700);
+    return { x, y, vx: Math.cos(a)*spd, vy: Math.sin(a)*spd, life: 1, r: (Math.random()*3+1)*(W/700) };
+  });
+  explosions.push({ x, y, particles, life: 1, color });
+}
+
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  if (isDay) { g.addColorStop(0,'#1a78c2'); g.addColorStop(1,'#87ceeb'); }
+  else        { g.addColorStop(0,'#05102a'); g.addColorStop(1,'#112244'); }
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, GROUND_Y);
+
+  if (isDay) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(W-s(80), s(60), s(32), 0, Math.PI*2);
+    ctx.fillStyle='#FFD700'; ctx.shadowColor='#FFD700'; ctx.shadowBlur=s(40); ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle='#FFD700'; ctx.lineWidth=s(3);
+    for (let i=0;i<8;i++) {
+      const a=(i/8)*Math.PI*2;
+      ctx.beginPath(); ctx.moveTo(W-s(80)+Math.cos(a)*s(36), s(60)+Math.sin(a)*s(36));
+      ctx.lineTo(W-s(80)+Math.cos(a)*s(50), s(60)+Math.sin(a)*s(50)); ctx.stroke();
+    }
+    [[s(120),s(60)],[s(300),s(40)],[s(500),s(70)]].forEach(([cx,cy]) => {
+      ctx.fillStyle='rgba(255,255,255,0.85)';
+      [0,s(18),s(-18),s(28),s(-28)].forEach(ox => {
+        const r = Math.max(1, s(18)-Math.abs(ox)*0.2);
+        ctx.beginPath(); ctx.arc(cx+ox, cy, r, 0, Math.PI*2); ctx.fill();
+      });
+    });
+    ctx.restore();
+  } else {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(W-s(80), s(60), s(28), 0, Math.PI*2);
+    ctx.fillStyle='#fffde7'; ctx.shadowColor='#fffde7'; ctx.shadowBlur=s(30); ctx.fill(); ctx.shadowBlur=0;
+    ctx.beginPath(); ctx.arc(W-s(68), s(52), s(6), 0, Math.PI*2); ctx.fillStyle='#ede9b0'; ctx.fill();
+    ctx.beginPath(); ctx.arc(W-s(85), s(65), s(4), 0, Math.PI*2); ctx.fillStyle='#ede9b0'; ctx.fill();
+    ctx.restore();
+    ctx.save();
+    stars.forEach(st => {
+      st.a += 0.02;
+      ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, Math.PI*2);
+      ctx.fillStyle=`rgba(255,255,255,${0.4+0.6*Math.abs(Math.sin(st.a))})`; ctx.fill();
+    });
+    ctx.restore();
+  }
+}
+
+function drawGround() {
+  const g = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  g.addColorStop(0,'#3a5c1a'); g.addColorStop(0.3,'#2d4a12'); g.addColorStop(1,'#1a2d08');
+  ctx.fillStyle=g; ctx.fillRect(0, GROUND_Y, W, H-GROUND_Y);
+  ctx.strokeStyle='#5a8a25'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,GROUND_Y); ctx.lineTo(W,GROUND_Y); ctx.stroke();
+  ctx.fillStyle='#4a7020';
+  for (let i=0;i<8;i++) {
+    ctx.beginPath();
+    ctx.ellipse(s(30)+i*s(90), GROUND_Y, s(30)+Math.sin(i)*s(10), s(8)+Math.sin(i*2)*s(4), 0, Math.PI, 0);
+    ctx.fill();
+  }
+}
+
+function drawDome() {
+  const cx=W/2, cy=GROUND_Y;
+  ctx.fillStyle='#556b2f'; ctx.beginPath(); ctx.roundRect(cx-s(30), cy-s(18), s(60), s(18), 4); ctx.fill();
+  ctx.fillStyle='#222';
+  [cx-s(22), cx, cx+s(22)].forEach(wx => {
+    ctx.beginPath(); ctx.arc(wx, cy, s(9), 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#555'; ctx.lineWidth=2; ctx.stroke();
+  });
+  ctx.fillStyle='#6b7c3a'; ctx.beginPath(); ctx.roundRect(cx-s(18), cy-s(42), s(36), s(26), 5); ctx.fill();
+  [-30,-15,0,15,30].forEach(ang => {
+    const r=ang*Math.PI/180;
+    const tx=cx+Math.sin(r)*s(28), ty=cy-s(35)-Math.cos(r)*s(28);
+    ctx.strokeStyle='#8a9a4a'; ctx.lineWidth=s(5); ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(cx,cy-s(35)); ctx.lineTo(tx,ty); ctx.stroke();
+    ctx.beginPath(); ctx.arc(tx,ty,s(3),0,Math.PI*2); ctx.fillStyle='#aab'; ctx.fill();
+  });
+  ctx.save(); ctx.translate(cx-s(50), cy-s(15));
+  ctx.strokeStyle='#7a9a3a'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-s(20)); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0,-s(20),s(10),Math.PI,0); ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle='#cde'; ctx.font=`bold ${s(11)}px Arial`; ctx.textAlign='center';
+  ctx.fillText('כיפת ברזל', cx, cy-s(48));
+}
+
+function updateMissiles() {
+  missiles.forEach(m => {
+    if (!m.alive) return;
+    m.trail.push({x:m.x, y:m.y});
+    if (m.trail.length>18) m.trail.shift();
+    m.x+=m.vx; m.y+=m.vy;
+    if (m.y>=GROUND_Y) {
+      m.alive=false; makeExplosion(m.x,GROUND_Y,'#f80');
+      lives--; if(lives<=0) endGame(); updateUI();
+    }
+  });
+  missiles=missiles.filter(m=>m.alive);
+}
+
+function drawMissiles() {
+  missiles.forEach(m => {
+    m.trail.forEach((p,i) => {
+      const a=i/m.trail.length;
+      ctx.beginPath(); ctx.arc(p.x,p.y,s(2)*a,0,Math.PI*2);
+      ctx.fillStyle=`rgba(255,100,0,${a*0.7})`; ctx.fill();
+    });
+    ctx.save(); ctx.translate(m.x,m.y); ctx.rotate(Math.atan2(m.vy,m.vx));
+    ctx.fillStyle='#d44'; ctx.beginPath(); ctx.roundRect(-s(12),-s(3),s(22),s(6),2); ctx.fill();
+    ctx.fillStyle='#ff6'; ctx.beginPath(); ctx.moveTo(s(10),0); ctx.lineTo(s(16),-s(2)); ctx.lineTo(s(16),s(2)); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#a33';
+    ctx.beginPath(); ctx.moveTo(-s(12),0); ctx.lineTo(-s(16),-s(5)); ctx.lineTo(-s(12),-s(2)); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-s(12),0); ctx.lineTo(-s(16),s(5));  ctx.lineTo(-s(12),s(2));  ctx.closePath(); ctx.fill();
+    ctx.restore();
+  });
+}
+
+function updateInterceptors() {
+  interceptors.forEach(ic => {
+    if (!ic.alive) return;
+    let nearest=null, minDist=Infinity;
+    missiles.forEach(m => { const d=Math.hypot(m.x-ic.x,m.y-ic.y); if(d<minDist){minDist=d;nearest=m;} });
+    if (nearest) {
+      const dx=nearest.x-ic.x, dy=nearest.y-ic.y, len=Math.sqrt(dx*dx+dy*dy);
+      const spd=7*(W/700);
+      ic.vx=ic.vx*0.8+(dx/len*spd)*0.2; ic.vy=ic.vy*0.8+(dy/len*spd)*0.2;
+    }
+    ic.trail.push({x:ic.x,y:ic.y});
+    if(ic.trail.length>12) ic.trail.shift();
+    ic.x+=ic.vx; ic.y+=ic.vy;
+    missiles.forEach(m => {
+      if(!m.alive) return;
+      if(Math.hypot(m.x-ic.x,m.y-ic.y)<s(20)){
+        m.alive=false; ic.alive=false; makeExplosion(m.x,m.y,'#4cf'); score++; updateUI();
+      }
+    });
+    if(ic.x<-50||ic.x>W+50||ic.y<-50||ic.y>H+50) ic.alive=false;
+  });
+  interceptors=interceptors.filter(ic=>ic.alive);
+  missiles=missiles.filter(m=>m.alive);
+}
+
+function drawInterceptors() {
+  interceptors.forEach(ic => {
+    ic.trail.forEach((p,i) => {
+      const a=i/ic.trail.length;
+      ctx.beginPath(); ctx.arc(p.x,p.y,s(1.5)*a,0,Math.PI*2);
+      ctx.fillStyle=`rgba(100,200,255,${a*0.8})`; ctx.fill();
+    });
+    ctx.save(); ctx.translate(ic.x,ic.y); ctx.rotate(Math.atan2(ic.vy,ic.vx));
+    ctx.fillStyle='#5cf'; ctx.beginPath(); ctx.roundRect(-s(8),-s(2),s(14),s(4),2); ctx.fill();
+    ctx.fillStyle='#ff0'; ctx.beginPath(); ctx.moveTo(-s(8),0); ctx.lineTo(-s(14),-s(3)); ctx.lineTo(-s(14),s(3)); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  });
+}
+
+function updateExplosions() {
+  explosions.forEach(ex => {
+    ex.life-=0.03;
+    ex.particles.forEach(p => { p.x+=p.vx; p.y+=p.vy; p.vy+=0.1; p.life-=0.04; p.vx*=0.95; p.vy*=0.95; });
+  });
+  explosions=explosions.filter(ex=>ex.life>0);
+}
+
+function drawExplosions() {
+  explosions.forEach(ex => {
+    ctx.beginPath(); ctx.arc(ex.x,ex.y,(1-ex.life)*s(40),0,Math.PI*2);
+    ctx.strokeStyle=`rgba(255,200,50,${ex.life*0.5})`; ctx.lineWidth=3; ctx.stroke();
+    ex.particles.forEach(p => {
+      if(p.life<=0) return;
+      ctx.beginPath(); ctx.arc(p.x,p.y,p.r*p.life,0,Math.PI*2);
+      ctx.fillStyle=ex.color==='#4cf'?`rgba(80,200,255,${p.life})`:`rgba(255,160,30,${p.life})`; ctx.fill();
+    });
+  });
+}
+
+function drawAlerts() {
+  if(!missiles.length) return;
+  const t=Math.sin(frameCount*0.15);
+  if(t>0){
+    ctx.fillStyle=`rgba(255,50,50,${t*0.15})`; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle=`rgba(255,80,80,${t*0.9})`;
+    ctx.font=`bold ${s(22)}px Arial`; ctx.textAlign='center';
+    ctx.fillText('⚠️ אזעקה! ⚠️', W/2, s(35));
+  }
+}
+
+function handleWaves() {
+  if(frameCount%spawnRate===0) spawnMissile();
+  if(frameCount>0&&frameCount%900===0){ wave++; spawnRate=Math.max(60,spawnRate-20); ammo+=10; updateUI(); }
+}
+
+function endGame() {
+  gameRunning=false;
+  document.getElementById('gameover').style.display='block';
+  document.getElementById('final').textContent=score;
+}
+
+function loop() {
+  if(!gameRunning) return;
+  frameCount++;
+  ctx.clearRect(0,0,W,H);
+  drawSky(); handleWaves();
+  updateMissiles(); updateInterceptors(); updateExplosions();
+  drawMissiles(); drawInterceptors(); drawExplosions();
+  drawGround(); drawDome(); drawAlerts();
+  requestAnimationFrame(loop);
+}
+
+initGame();
+</script>
+</body>
+</html>
